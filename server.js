@@ -33,6 +33,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use('/photos', express.static(path.join(__dirname, 'photos')));
 
+// Endpoints для роботи з постами
 app.get('/posts', (req, res) => {
     db.all("SELECT * FROM posts", (err, rows) => {
         if (err) {
@@ -118,11 +119,44 @@ app.get('/photos/:photoId', (req, res) => {
     });
 });
 
+// Endpoints для роботи з шрифтами
+const googleFontsApiUrl = `https://www.googleapis.com/webfonts/v1/webfonts?key=${process.env.GOOGLE_FONTS_API_KEY}`;
+
+app.get('/fonts', async (req, res) => {
+    try {
+        const response = await fetch(googleFontsApiUrl);
+        const data = await response.json();
+
+        const fonts = data.items.map(font => font.family);
+        res.json(fonts);
+    } catch (error) {
+        console.error('Помилка завантаження шрифтів з Google Fonts:', error);
+        res.status(500).send('Не вдалося завантажити шрифти');
+    }
+});
+
+// Обробка заявок на сеанси
+app.post('/appointment', (req, res) => {
+    const { name, phone } = req.body;
+
+    if (!name || !phone) {
+        return res.status(400).send('Потрібно надіслати ім\'я та номер телефону');
+    }
+
+    bot.telegram.sendMessage(process.env.TELEGRAM_CHAT_ID, `Нова заявка на сеанс:\nІм'я: ${name}\nНомер телефону: ${phone}`)
+        .then(() => res.status(200).send('Заявка успішно відправлена'))
+        .catch((error) => {
+            console.error('Помилка відправки повідомлення:', error);
+            res.status(500).send('Помилка при відправці заявки');
+        });
+});
+
+// Запуск сервера
 app.listen(PORT, () => {
     console.log(`Сервер працює на порті ${PORT}`);
 });
 
-// Бот Telegram
+// Telegram Bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
 // Словник для зберігання тимчасових даних про медіагрупи
@@ -230,19 +264,5 @@ bot.command('deletepost', (ctx) => {
 bot.on('text', (ctx) => {
     ctx.reply('Будь ласка, надішліть фотографію з підписом.');
 });
-app.post('/appointment', (req, res) => {
-    const { name, phone } = req.body;
 
-    if (!name || !phone) {
-        return res.status(400).send('Потрібно надіслати ім\'я та номер телефону');
-    }
-
-    // Використовуємо бота для відправки повідомлення з даними
-    bot.telegram.sendMessage(process.env.TELEGRAM_CHAT_ID, `Нова заявка на сеанс:\nІм'я: ${name}\nНомер телефону: ${phone}`)
-        .then(() => res.status(200).send('Заявка успішно відправлена'))
-        .catch((error) => {
-            console.error('Помилка відправки повідомлення:', error);
-            res.status(500).send('Помилка при відправці заявки');
-        });
-});
 bot.launch();
