@@ -1,5 +1,5 @@
 import express from 'express';
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import { Telegraf } from 'telegraf';
 import fs from 'fs/promises';
 import path from 'path';
@@ -16,12 +16,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const dbPath = path.join(__dirname, 'posts.db');
-const db = new sqlite3.Database(dbPath);
+const db = new Database(dbPath);
 
 // Create table if it doesn't exist
-db.serialize(() => {
-    db.run("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, photo_paths TEXT, caption TEXT)");
-});
+db.exec("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, photo_paths TEXT, caption TEXT)");
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000');
@@ -33,15 +31,14 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use('/photos', express.static(path.join(__dirname, 'photos')));
 
-// Endpoints для роботи з постами
+// Endpoints for working with posts
 app.get('/posts', (req, res) => {
-    db.all("SELECT * FROM posts", (err, rows) => {
-        if (err) {
-            res.status(500).send(err.message);
-        } else {
-            res.json(rows);
-        }
-    });
+    try {
+        const rows = db.prepare("SELECT * FROM posts").all();
+        res.json(rows);
+    } catch (err) {
+        res.status(500).send(err.message);
+    }
 });
 
 app.post('/newpost', async (req, res) => {
@@ -57,8 +54,7 @@ app.post('/newpost', async (req, res) => {
             const photoUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${photo_path}`;
             const response = await fetch(photoUrl);
             if (response.ok) {
-                const arrayBuffer = await response.arrayBuffer();
-                const buffer = Buffer.from(arrayBuffer);
+                const buffer = Buffer.from(await response.arrayBuffer());
 
                 const photoFileName = `${Date.now()}_${path.basename(photo_path)}`;
                 const photoFilePath = path.join(__dirname, 'photos', photoFileName);
@@ -71,15 +67,10 @@ app.post('/newpost', async (req, res) => {
         }
 
         if (savedPhotoPaths.length > 0) {
-            db.run("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)", [JSON.stringify(savedPhotoPaths), caption], (err) => {
-                if (err) {
-                    console.error(err.message);
-                    res.status(500).send('Помилка при збереженні посту у базі даних');
-                } else {
-                    console.log("Новий пост збережено:", { photoPaths: savedPhotoPaths, caption });
-                    res.status(200).send('Пост успішно збережено у базі даних');
-                }
-            });
+            db.prepare("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)")
+                .run(JSON.stringify(savedPhotoPaths), caption);
+            console.log("Новий пост збережено:", { photoPaths: savedPhotoPaths, caption });
+            res.status(200).send('Пост успішно збережено у базі даних');
         } else {
             res.status(400).send('Немає дійсних фото для збереження');
         }
@@ -92,34 +83,33 @@ app.post('/newpost', async (req, res) => {
 app.delete('/posts/:id', (req, res) => {
     const postId = req.params.id;
 
-    db.run("DELETE FROM posts WHERE id = ?", postId, function(err) {
-        if (err) {
-            console.error(err.message);
-            res.status(500).send('Помилка при видаленні посту');
-        } else if (this.changes === 0) {
+    try {
+        const info = db.prepare("DELETE FROM posts WHERE id = ?").run(postId);
+        if (info.changes === 0) {
             res.status(404).send('Пост не знайдено');
         } else {
             console.log(`Пост з ID ${postId} видалено`);
             res.status(200).send('Пост успішно видалено');
         }
-    });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Помилка при видаленні посту');
+    }
 });
 
 app.get('/photos/:photoId', (req, res) => {
     const { photoId } = req.params;
     const photoPath = path.join(__dirname, 'photos', photoId);
 
-    fs.access(photoPath, fs.constants.F_OK, (err) => {
-        if (err) {
+    fs.access(photoPath)
+        .then(() => res.sendFile(photoPath))
+        .catch(err => {
             console.error(err);
             res.status(404).send('Зображення не знайдено');
-        } else {
-            res.sendFile(photoPath);
-        }
-    });
+        });
 });
 
-// Endpoints для роботи з шрифтами
+// Endpoints for working with fonts
 const googleFontsApiUrl = `https://www.googleapis.com/webfonts/v1/webfonts?key=${process.env.GOOGLE_FONTS_API_KEY}`;
 
 app.get('/fonts', async (req, res) => {
@@ -135,7 +125,7 @@ app.get('/fonts', async (req, res) => {
     }
 });
 
-// Обробка заявок на сеанси
+// Handle appointment requests
 app.post('/appointment', (req, res) => {
     const { name, phone } = req.body;
 
@@ -151,7 +141,7 @@ app.post('/appointment', (req, res) => {
         });
 });
 
-// Запуск сервера
+// Start the server
 app.listen(PORT, () => {
     console.log(`Сервер працює на порті ${PORT}`);
 });
@@ -159,10 +149,10 @@ app.listen(PORT, () => {
 // Telegram Bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// Словник для зберігання тимчасових даних про медіагрупи
+// Dictionary to store temporary data about media groups
 const mediaGroupStorage = {};
 
-// Функція для збереження медіагрупи
+// Function to save media group
 async function saveMediaGroup(ctx, mediaGroupId) {
     const mediaGroup = mediaGroupStorage[mediaGroupId];
     if (!mediaGroup) {
@@ -172,17 +162,12 @@ async function saveMediaGroup(ctx, mediaGroupId) {
 
     const { photoPaths, caption } = mediaGroup;
 
-    db.run("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)", [JSON.stringify(photoPaths), caption], (err) => {
-        if (err) {
-            console.error(err.message);
-            ctx.reply('Помилка при збереженні посту у базі даних');
-        } else {
-            console.log("Новий пост збережено:", { photoPaths, caption });
-            ctx.reply('Фото та текст успішно завантажено і збережено в базі даних');
-        }
-    });
+    db.prepare("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)")
+        .run(JSON.stringify(photoPaths), caption);
+    console.log("Новий пост збережено:", { photoPaths, caption });
+    ctx.reply('Фото та текст успішно завантажено і збережено в базі даних');
 
-    // Видаляємо дані зі словника після збереження
+    // Remove data from the dictionary after saving
     delete mediaGroupStorage[mediaGroupId];
 }
 
@@ -196,8 +181,7 @@ bot.on('photo', async (ctx) => {
         const photoUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${photo.file_path}`;
         const response = await fetch(photoUrl);
         if (response.ok) {
-            const arrayBuffer = await response.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
+            const buffer = Buffer.from(await response.arrayBuffer());
 
             const photoFileName = `${Date.now()}_${photo.file_unique_id}.jpg`;
             const photoFilePath = path.join(__dirname, 'photos', photoFileName);
@@ -220,15 +204,10 @@ bot.on('photo', async (ctx) => {
                     }
                 }, 2000);
             } else {
-                db.run("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)", [JSON.stringify([photoFileName]), caption], (err) => {
-                    if (err) {
-                        console.error(err.message);
-                        ctx.reply('Помилка при збереженні посту у базі даних');
-                    } else {
-                        console.log("Новий пост збережено:", { photoPaths: [photoFileName], caption });
-                        ctx.reply('Фото та текст успішно завантажено і збережено в базі даних');
-                    }
-                });
+                db.prepare("INSERT INTO posts (photo_paths, caption) VALUES (?, ?)")
+                    .run(JSON.stringify([photoFileName]), caption);
+                console.log("Новий пост збережено:", { photoPaths: [photoFileName], caption });
+                ctx.reply('Фото та текст успішно завантажено і збережено в базі даних');
             }
         } else {
             console.error(`Помилка завантаження фото ${photoId}:`, response.statusText);
@@ -248,17 +227,18 @@ bot.command('deletepost', (ctx) => {
 
     const postId = args[1];
 
-    db.run("DELETE FROM posts WHERE id = ?", postId, function(err) {
-        if (err) {
-            console.error(err.message);
-            ctx.reply('Помилка при видаленні посту');
-        } else if (this.changes === 0) {
+    try {
+        const info = db.prepare("DELETE FROM posts WHERE id = ?").run(postId);
+        if (info.changes === 0) {
             ctx.reply('Пост не знайдено');
         } else {
             console.log(`Пост з ID ${postId} видалено`);
             ctx.reply('Пост успішно видалено');
         }
-    });
+    } catch (err) {
+        console.error(err.message);
+        ctx.reply('Помилка при видаленні посту');
+    }
 });
 
 bot.on('text', (ctx) => {
